@@ -311,46 +311,6 @@ This single choice reshapes Stories 7–12.
 
 ---
 
-## Appendix A. Decoding the parent-epic statement
-
-The PLMPGM-6492 summary is dense with OpenShift-specific jargon. Here it is, clause by clause, in plain terms — useful for reviewers who haven't lived in `#forum-ocp-tls-strict-obedience`.
-
-> *"...centralizes security configurations via the existing OpenShift API server `tlsSecurityProfile`..."*
-
-There is **already** a cluster-wide setting — `APIServer.spec.tlsSecurityProfile` — where the admin declares the allowed TLS version + ciphers (Old / Intermediate / Modern / Custom). The plan is to make **every component read from this one existing setting** instead of hardcoding its own. "Centralize" = one source of truth, many consumers.
-**For us:** our services must *pull* version/ciphers from here, not inherit library defaults.
-
-> *"...introducing a mandatory `TLSAdherence` toggle (legacy or strict) to enforce compliance..."*
-
-A **new** cluster switch with two positions: **legacy** (tolerate not-yet-migrated components — a grace period) and **strict** (components *must* obey; deviation is a defect). It's "mandatory" in that the switch always exists and every component is expected to honor it.
-**For us:** read this switch; in **strict** mode **fail closed** (error out) rather than silently fall back to defaults.
-
-> *"...while letting the Ingress Controller API support legacy client overrides."*
-
-A deliberate escape hatch: the API-server profile governs internal TLS strictly, but the **Ingress profile is allowed to be more permissive**, so an admin can keep older *external* clients working at the edge without weakening the whole cluster.
-**For us:** this is exactly our **edge-vs-internal split** (§5). Edge endpoints follow the (possibly looser) Ingress profile; internal pod-to-pod traffic follows the stricter API-server profile. Two different knobs, on purpose.
-
-> *"...non-compliance in 'strict' mode will be treated as a security bug..."*
-
-Not tech-debt, not a feature request — a **release-blocking security defect** filed against *your* component. If your service negotiates a forbidden handshake while the cluster is in strict mode, that's a shippable blocker.
-**For us:** this is why the epic is a **4.22 release blocker**, and why our verification matrix exists — to prove we never generate such a bug.
-
-> *"...verified through ... eBPF-based handshake snooping, ... Golang instrumentation of crypto libraries, and continuous CI port scanning..."*
-
-Three independent ways the platform team will **measure** us:
-- **eBPF handshake snooping** — kernel-level capture of the *actual* handshake on the wire (what really got negotiated, regardless of what config claims).
-- **Go crypto instrumentation** — hooking Go's `crypto/tls` to observe the version/suite each Go process picks internally.
-- **CI port scanning** — automated scanners hitting our endpoints continuously, asserting only permitted profiles are accepted.
-
-**For us:** "configure and hope" is not enough. Compliance is **measured on the wire**, so our tests must check the *negotiated* handshake, not just the rendered config.
-
-> *"...to identify and resolve 'silent failures' caused by Golang's restrictive TLS 1.3 implementation."*
-
-**The most important nuance.** Go **does not let you choose TLS 1.3 cipher suites** — `tls.Config.CipherSuites` only affects TLS ≤1.2; for 1.3 Go uses a fixed internal set you cannot restrict. So if an admin writes a **Custom** profile that disables a specific 1.3 suite, a Go server **cannot honor it** and keeps offering Go's built-in 1.3 suites. The handshake **silently diverges** from policy: no error, no log, but the scanners see a forbidden suite.
-**For us:** this is the single biggest trap (Risk #2). It's *why* a **non-Go TLS-terminating proxy** (nginx/haproxy — which *can* restrict 1.3 suites) is on the table for operands we can't fully control in Go, and why QE must be warned that a "failure" here may be Go's limitation, not our bug.
-
-**One-line takeaway:** the cluster gets **one place** to declare TLS policy, **one switch** to enforce it, with the **edge allowed to be looser** for old clients — and the platform team will **measure your actual handshakes** to catch cases where a Go service *says* it complies but, because Go can't constrain TLS 1.3 ciphers, **silently doesn't**.
-
 ---
 
 *Generated as an analysis/design artifact. No production code changed by this document. File references point at current `main` of `secure-sign-operator`.*
