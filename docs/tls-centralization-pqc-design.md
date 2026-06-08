@@ -1,7 +1,5 @@
 # Centralized TLS Security Profile & PQC Readiness — Design & Impact Analysis
 
-## 0. Plain-language summary (start here)
-
 **What is this change for?**
 
 Today, every service we ship (Fulcio, Rekor, Trillian, CTlog, the database, Redis, …) decides on its own *how* to encrypt its network traffic — which TLS version and which ciphers to use. Mostly they just take whatever the underlying library defaults to. Nobody is checking that these match the customer's security policy.
@@ -310,7 +308,3 @@ This single choice reshapes Stories 7–12.
 | Re-encrypt needs at edge | Med | D6; treat as real work, not verify-only |
 
 ---
-
----
-
-*Generated as an analysis/design artifact. No production code changed by this document. File references point at current `main` of `secure-sign-operator`.*
