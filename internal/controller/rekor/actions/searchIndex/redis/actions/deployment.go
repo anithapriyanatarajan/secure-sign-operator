@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 
+	configv1 "github.com/openshift/api/config/v1"
 	"github.com/securesign/operator/internal/action"
+	appconfig "github.com/securesign/operator/internal/config"
 	"github.com/securesign/operator/internal/constants"
 	"github.com/securesign/operator/internal/controller/rekor/actions"
 	"github.com/securesign/operator/internal/images"
@@ -204,6 +207,49 @@ func (i deployAction) ensurePassword(instance *rhtasv1.Rekor, container *core.Co
 	return nil
 }
 
+// redisTLSProtocols maps an OpenShift TLS profile minimum version to the equivalent
+// Redis "tls-protocols" allow-list (the minimum version plus every higher version). It
+// returns an empty string when no minimum is set, so the directive is omitted and Redis
+// keeps its built-in default.
+func redisTLSProtocols(min configv1.TLSProtocolVersion) string {
+	switch min {
+	case configv1.VersionTLS10:
+		return "TLSv1 TLSv1.1 TLSv1.2 TLSv1.3"
+	case configv1.VersionTLS11:
+		return "TLSv1.1 TLSv1.2 TLSv1.3"
+	case configv1.VersionTLS12:
+		return "TLSv1.2 TLSv1.3"
+	case configv1.VersionTLS13:
+		return "TLSv1.3"
+	default:
+		return ""
+	}
+}
+
+// redisTLSCiphers splits an OpenShift TLS profile cipher list into the two Redis
+// directives that mirror it: tls-ciphers (TLS 1.2 and below, OpenSSL name format) and
+// tls-ciphersuites (TLS 1.3, "TLS_"-prefixed names, which OpenSSL also accepts). The
+// OpenShift standard profiles already store 1.2 ciphers in OpenSSL format and 1.3
+// ciphers in TLS_ format, so the values are passed through verbatim, colon-joined.
+//
+// WARNING: cipher names are handed to Redis/OpenSSL without validation. Unlike the Go
+// endpoints (via ostls), which silently drop cipher names Go does not recognize, Redis
+// has no such filtering: a custom TLS profile naming a cipher the Redis image's OpenSSL
+// build does not support will make Redis reject redis.conf and crash-loop. This is a
+// deliberate, documented trade-off to achieve full cipher adherence for the standard
+// profiles.
+func redisTLSCiphers(ciphers []string) (tls12 string, tls13 string) {
+	var suites12, suites13 []string
+	for _, c := range ciphers {
+		if strings.HasPrefix(c, "TLS_") {
+			suites13 = append(suites13, c)
+			continue
+		}
+		suites12 = append(suites12, c)
+	}
+	return strings.Join(suites12, ":"), strings.Join(suites13, ":")
+}
+
 func (i deployAction) ensureTLS(tlsConfig rhtasv1.TLS, caPath string) func(deployment *v1.Deployment) error {
 	return func(dp *v1.Deployment) error {
 		if err := deployment.TLS(tlsConfig, actions.RedisDeploymentName)(dp); err != nil {
@@ -219,6 +265,23 @@ func (i deployAction) ensureTLS(tlsConfig rhtasv1.TLS, caPath string) func(deplo
 			fmt.Sprintf("tls-ca-cert-file %s", caPath),
 			// disable client authentication
 			"tls-auth-clients no",
+		}
+
+		// Enforce the cluster TLS minimum protocol version on the Redis listener so the
+		// in-cluster search-index connection honors the OpenShift TLS security profile.
+		if protocols := redisTLSProtocols(appconfig.ClusterTLSProfile.MinTLSVersion); protocols != "" {
+			dbConfig = append(dbConfig, fmt.Sprintf("tls-protocols \"%s\"", protocols))
+		}
+
+		// Mirror the profile's cipher suites onto the Redis listener, matching what ostls
+		// applies to the operator's Go endpoints. tls-ciphers covers TLS 1.2, tls-ciphersuites
+		// covers TLS 1.3. See redisTLSCiphers for the crash-loop risk with custom profiles.
+		tls12, tls13 := redisTLSCiphers(appconfig.ClusterTLSProfile.Ciphers)
+		if tls12 != "" {
+			dbConfig = append(dbConfig, fmt.Sprintf("tls-ciphers \"%s\"", tls12))
+		}
+		if tls13 != "" {
+			dbConfig = append(dbConfig, fmt.Sprintf("tls-ciphersuites \"%s\"", tls13))
 		}
 
 		config := kubernetes.FindVolumeByNameOrCreate(&dp.Spec.Template.Spec, "config")

@@ -54,6 +54,7 @@ import (
 	consolev1 "github.com/openshift/api/console/v1"
 	v1 "github.com/openshift/api/operator/v1"
 	routev1 "github.com/openshift/api/route/v1"
+
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -197,6 +198,11 @@ func main() {
 		setupLog.Error(resolveErr, "unable to resolve cluster TLS security profile")
 		os.Exit(1)
 	}
+
+	// Publish the resolved profile so component controllers can cascade it to managed
+	// workloads (currently the Rekor search-index Redis config). Set once at startup and
+	// read-only thereafter; the SecurityProfileWatcher restarts the operator on change.
+	appconfig.ClusterTLSProfile = tlsProfileSpec
 
 	tlsConfigFn, unsupportedCiphers := ostls.NewTLSConfigFromProfile(tlsProfileSpec)
 	if len(unsupportedCiphers) > 0 {
@@ -439,7 +445,10 @@ func resolveClusterTLSProfile(ctx context.Context, cli client.Client, openshift,
 		tlsAdherence = configv1.TLSAdherencePolicyNoOpinion
 	}
 
-	log.Info("cluster TLS security profile resolved")
+	log.Info("cluster TLS security profile resolved",
+		"minTLSVersion", tlsProfileSpec.MinTLSVersion,
+		"cipherCount", len(tlsProfileSpec.Ciphers),
+		"adherence", tlsAdherence)
 	return tlsProfileSpec, tlsAdherence, nil
 }
 
